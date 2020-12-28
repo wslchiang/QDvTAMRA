@@ -1,0 +1,170 @@
+#!/usr/bin/env python
+
+# references: 
+# Wang et al., Nano Lett. 13, 5233-5241 (2013)
+# Henriques et al., Nature Methods, 7, 339-340 (2010)
+
+import argparse, os
+from csv import DictReader
+from PIL import Image, ImageDraw, ImageFont
+from math import sqrt, pi
+
+CUTOFF_DEFAULT = 50
+SCALE_DEFAULT = 1.0
+BACKGROUND_STD_DEV_DEFAULT = 0.0
+SCALE_DEFAULT = 1.0
+
+RED_OPAQUE = (255,0,0,255)
+RED_TRANSPARENT = (255,0,0,128)
+BLACK_TRANSPARENT = (0,0,0,128)
+WHITE_OPAQUE = (255,255,255,255)
+
+# parse command line arguments
+p = argparse.ArgumentParser(description='convert csv to png file')
+p.add_argument('csvfile', help='comma separated value file from QuickPALM')
+p.add_argument('-c','--cutoff', type=float, 
+               help='cutoff for spot localization precision (nm).  Default: %.1f' % CUTOFF_DEFAULT,
+               default=CUTOFF_DEFAULT)
+p.add_argument('-W','--width', type=float,
+               help='width of output image in microns.  Default: use right-most spot',
+               default=-1.0)
+p.add_argument('-H','--height', type=float,
+               help='height of output image in microns.  Default: use bottom-most spot',
+               default=-1.0)
+p.add_argument('-s','--scale', type=int,
+               help='scale of output image.  Default: %.1f' % SCALE_DEFAULT,
+               default=SCALE_DEFAULT)
+p.add_argument('-B','--scale-bar', type=float,
+               help='length of scale bar in microns.  Default: No scale bar',
+               default=-1.0)
+p.add_argument('-b','--background-std-dev', type=float, 
+               help='standard deviation of background.  Default: %.1f' % BACKGROUND_STD_DEV_DEFAULT, 
+               default=BACKGROUND_STD_DEV_DEFAULT)
+p.add_argument
+p.add_argument('-o','--output', help='output filename.  Default: use csv filename with .png instead of .csv')
+p.add_argument('-v','--verbose', help='print out spot info', action='store_true')
+
+
+args = p.parse_args()
+
+# output filename
+pngfile = args.output if args.output else os.path.join(os.path.dirname(args.csvfile), os.path.splitext(os.path.basename(args.csvfile))[0]+'.png')
+
+def i(x):
+    return int(round(x))
+
+def almost_equal(x,y):
+    SMALL = 1e-3
+    return abs(x-y)/(abs(x)+SMALL) < SMALL
+
+class Spot:
+    def __init__(self,x,y,lp):
+        self.x = x
+        self.y = y
+        self.lp = lp # localization precision
+    def left(self):
+        return i(self.x) - i(self.lp)
+    def right(self):
+        return i(self.x) + i(self.lp)
+    def up(self):
+        return i(self.y) - i(self.lp)
+    def down(self):
+        return i(self.y) + i(self.lp)
+    def draw(self,d):
+        d.point((i(self.x),i(self.y)), fill=RED_OPAQUE)
+        d.ellipse((i(self.left()),i(self.up()),i(self.right()),i(self.down())),
+                      outline=BLACK_TRANSPARENT, fill=RED_TRANSPARENT)
+
+# Read csv file and create list of spots
+spots = list()
+px2nm = None
+nspots_orig = 0
+with open(args.csvfile) as f:
+    for row in DictReader(f):
+        nspots_orig += 1
+        Xpx = float(row['X (px)'])
+        Xnm = float(row['X (nm)'])
+        Ypx = float(row['Y (px)'])
+        Ynm = float(row['Y (nm)'])
+        N = float(row['Intensity'])
+        if args.verbose:
+            print('X (px): %f' % Xpx)
+            print('X (nm): %f' % Xnm)
+            print('Y (px): %f' % Ypx)
+            print('Y (nm): %f' % Ynm)
+        if px2nm is None:
+            px2nm = Xnm/Xpx
+            if args.verbose:
+                print('nm per pixel: %f\n' % px2nm)
+        else:
+            assert almost_equal(px2nm * Xpx, Xnm)
+            assert almost_equal(px2nm * Ypx, Ynm)
+        LW = float(row['Left-Width (px)'])
+        RW = float(row['Right-Width (px)'])
+        UH = float(row['Up-Height (px)'])
+        DH = float(row['Down-Height (px)'])
+        mad = 0.25*(LW+RW+UH+DH) # mean absolute deviation of point spread function (pixels)
+        s = sqrt(pi/2)*mad # estimated standard deviation
+        a = 1.0 # pixel size (pixels)
+        b = args.background_std_dev # standard deviation of background
+        lpx = sqrt(s**2/N + a/(12.0*N) + 8*pi*s**4*b**2/(a**2 * N**2)) # localization precision (pixels)
+        lnm = px2nm * lpx # localization precision (nm)
+        if args.verbose:
+            print('Left-Width (px): %f' % LW)
+            print('Right-Width (px): %f'% RW)
+            print('Up-Height (px): %f' % UH)
+            print('Down-Height (px): %f' % DH)
+            print('Localization precision (px): %f' % lpx)
+            print('Localization precision (nm): %f' % lnm)
+        if lnm < args.cutoff:
+            spots.append(Spot(Xpx*args.scale, Ypx*args.scale, lpx*args.scale))
+        if args.verbose:
+            print('')
+
+print('%d spots total' % nspots_orig)
+print('%d spots with localization precision less than cutoff' % len(spots))
+if len(spots) == 0:
+    exit(1)
+
+# Find boundary
+xmax = None
+ymax = None
+for s in spots:
+    if xmax is None or s.right() > xmax:
+        xmax = s.right()
+    if ymax is None or s.down() > ymax:
+        ymax = s.down()
+
+microns2px = 1000 * args.scale / px2nm
+
+# if width, height given, use that instead
+if args.width > 0:
+    tmp = args.width * microns2px
+    if xmax > tmp:
+        print('warning: --width is smaller than right-most spot')
+    xmax = tmp 
+if args.height > 0:
+    tmp = args.height * microns2px
+    if ymax > tmp:
+        print('warning: --height is smaller than bottom-most spot')
+    ymax = tmp 
+
+# Create output image
+im = Image.new('RGB', (i(xmax), i(ymax)))
+d = ImageDraw.Draw(im, 'RGBA')
+
+# Draw spots
+for s in spots:
+    s.draw(d)
+
+# Draw scale bar in bottom left of image
+if args.scale_bar > 0:
+    xbar = args.scale_bar * microns2px
+    ybar = xbar / 10
+    d.rectangle([ybar, ymax-2*ybar, ybar+xbar, ymax-ybar], fill=WHITE_OPAQUE)
+    f = ImageFont.truetype('/home/hstern2/myfont.ttf', i(ybar))
+    label = '%.1f micron%s' % (args.scale_bar, '' if almost_equal(args.scale_bar, 1) else 's')
+    d.text([ybar, ymax-4*ybar], label, font=f)
+
+# Save image as PNG
+im.save(pngfile)
